@@ -53,9 +53,18 @@
 
     async function fetchAircraftData() {
       try {
-        const url = `https://api.airplanes.live/v2/point/${CONFIG.lat}/${CONFIG.lon}/${CONFIG.radiusNm}`;
-        const response = await fetch(url);
+        const lat = Number(CONFIG.lat);
+        const lon = Number(CONFIG.lon);
+        const targetUrl = `https://api.airplanes.live/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`;
+        
+        // Pass API request through AllOrigins CORS proxy
+        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+
+        const response = await fetch(proxyUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}: Request failed`);
+        
         const data = await response.json();
+        console.log("Fetched aircraft count:", data.ac ? data.ac.length : 0);
         aircraftList = data.ac || [];
       } catch (err) {
         console.error("API Fetch Error:", err);
