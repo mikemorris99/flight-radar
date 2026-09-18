@@ -22,6 +22,7 @@
     const canvas = document.getElementById('radarCanvas');
     const ctx = canvas.getContext('2d');
     let aircraftList = [];
+    let statusText = "INITIALIZING...";
 
     function resizeCanvas() {
       const size = Math.min(window.innerWidth, window.innerHeight);
@@ -31,7 +32,6 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    // Haversine formula for distance in km
     function getDistanceKm(lat1, lon1, lat2, lon2) {
       const R = 6371;
       const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -42,7 +42,6 @@
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    // Initial bearing calculation in degrees
     function getBearingDeg(lat1, lon1, lat2, lon2) {
       const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
       const Δλ = (lon2 - lon1) * Math.PI / 180;
@@ -52,23 +51,39 @@
     }
 
     async function fetchAircraftData() {
-      try {
-        const lat = Number(CONFIG.lat);
-        const lon = Number(CONFIG.lon);
-        const targetUrl = `https://api.airplanes.live/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`;
-        
-        // Pass API request through AllOrigins CORS proxy
-        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+      const lat = Number(CONFIG.lat);
+      const lon = Number(CONFIG.lon);
+      const targetUrl = `https://api.airplanes.live/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`;
+      
+      const proxyEndpoints = [
+        `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
+        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`
+      ];
 
-        const response = await fetch(proxyUrl);
-        if (!response.ok) throw new Error(`HTTP ${response.status}: Request failed`);
-        
-        const data = await response.json();
-        console.log("Fetched aircraft count:", data.ac ? data.ac.length : 0);
-        aircraftList = data.ac || [];
-      } catch (err) {
-        console.error("API Fetch Error:", err);
+      for (let url of proxyEndpoints) {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) continue;
+
+          let data;
+          if (url.includes('allorigins.win')) {
+            const wrapper = await response.json();
+            data = JSON.parse(wrapper.contents);
+          } else {
+            data = await response.json();
+          }
+
+          if (data && Array.isArray(data.ac)) {
+            aircraftList = data.ac;
+            statusText = `ONLINE | PLANES IN RANGE: ${aircraftList.length}`;
+            console.log("Successfully fetched aircraft:", aircraftList.length);
+            return;
+          }
+        } catch (e) {
+          console.warn("Proxy attempt failed:", url, e);
+        }
       }
+      statusText = "ERROR: NO DATA FROM PROXIES";
     }
 
     function drawRadar() {
@@ -77,6 +92,11 @@
       const maxPx = cx - 20;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw Status Text Overlay
+      ctx.fillStyle = '#00ff66';
+      ctx.font = '12px monospace';
+      ctx.fillText(statusText, 15, 25);
 
       // Draw concentric distance rings (10 km intervals)
       ctx.strokeStyle = '#003311';
@@ -96,7 +116,7 @@
 
       // Draw aircraft blips
       aircraftList.forEach(ac => {
-        if (!ac.lat || !ac.lon) return;
+        if (typeof ac.lat !== 'number' || typeof ac.lon !== 'number') return;
 
         const distKm = getDistanceKm(CONFIG.lat, CONFIG.lon, ac.lat, ac.lon);
         if (distKm > CONFIG.maxRadiusKm) return;
@@ -105,20 +125,16 @@
         const rPx = (distKm / CONFIG.maxRadiusKm) * maxPx;
         const angleRad = bearing * Math.PI / 180;
 
-        // Convert polar to Cartesian screen coordinates
         const x = cx + rPx * Math.sin(angleRad);
         const y = cy - rPx * Math.cos(angleRad);
 
-        // Convert altitude from feet to meters
         const altMeters = typeof ac.alt_baro === 'number' ? Math.round(ac.alt_baro * 0.3048) : 'GND';
 
-        // Plot blip
         ctx.fillStyle = '#00ff66';
         ctx.beginPath();
         ctx.arc(x, y, 4, 0, 2 * Math.PI);
         ctx.fill();
 
-        // Label text
         ctx.fillStyle = '#00ff66';
         ctx.font = '10px monospace';
         const label = `${ac.flight ? ac.flight.trim() : 'UNK'} | ${altMeters}m`;
