@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Flight Radar</title>
   <style>
-    body { margin: 0; background-color: #050b05; color: #00ff66; font-family: monospace; overflow: hidden; }
-    canvas { display: block; margin: 0 auto; background: #000; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background-color: #040804; color: #00ff66; font-family: monospace; overflow: hidden; height: 100vh; display: flex; justify-content: center; align-items: center; }
+    canvas { display: block; background: #000; box-shadow: 0 0 20px rgba(0, 255, 102, 0.15); }
   </style>
 </head>
 <body>
@@ -14,15 +16,16 @@
     const CONFIG = {
       lat: 51.049476,
       lon: 0.183738,
-      radiusNm: 27,        // API query radius in NM (~50 km)
-      maxRadiusKm: 50,     // Radar edge distance in km
-      pollIntervalMs: 15000
+      radiusNm: 27,        // ~50 km radius
+      maxRadiusKm: 50,
+      pollIntervalMs: 12000
     };
 
     const canvas = document.getElementById('radarCanvas');
     const ctx = canvas.getContext('2d');
     let aircraftList = [];
-    let statusText = "INITIALIZING...";
+    let activeSource = "INITIALIZING...";
+    let lastError = "";
 
     function resizeCanvas() {
       const size = Math.min(window.innerWidth, window.innerHeight);
@@ -32,16 +35,18 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
+    // Haversine formula for distance in kilometers
     function getDistanceKm(lat1, lon1, lat2, lon2) {
       const R = 6371;
       const dLat = (lat2 - lat1) * Math.PI / 180;
       const dLon = (lon2 - lon1) * Math.PI / 180;
-      const a = Math.sin(dLat/2) ** 2 +
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
                 Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                Math.sin(dLon/2) ** 2;
+                Math.sin(dLon/2) * Math.sin(dLon/2);
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
+    // Initial bearing in degrees
     function getBearingDeg(lat1, lon1, lat2, lon2) {
       const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
       const Δλ = (lon2 - lon1) * Math.PI / 180;
@@ -50,49 +55,96 @@
       return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
     }
 
-    async function fetchAircraftData() {
-      const lat = Number(CONFIG.lat);
-      const lon = Number(CONFIG.lon);
+    // Normalize payloads across different API providers
+    function parseAircraftPayload(data, providerName) {
+      const parsed = [];
       
-      // Native CORS endpoints (No proxy required)
-      const endpoints = [
-        `https://api.adsb.lol/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`,
-        `https://api.adsb.one/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`
+      // Standard Readsb/tar1090 format (ADSB.lol, ADSB.one)
+      if (data && Array.isArray(data.ac)) {
+        data.ac.forEach(ac => {
+          if (typeof ac.lat !== 'number' || typeof ac.lon !== 'number') return;
+          const altM = typeof ac.alt_baro === 'number' ? Math.round(ac.alt_baro * 0.3048) :
+                       typeof ac.alt_geom === 'number' ? Math.round(ac.alt_geom * 0.3048) : 'GND';
+          const flightStr = ac.flight ? ac.flight.trim() : (ac.hex ? ac.hex.toUpperCase() : 'UNK');
+          parsed.push({ lat: ac.lat, lon: ac.lon, flight: flightStr, altMeters: altM, track: ac.track || 0 });
+        });
+      } 
+      // OpenSky Network format
+      else if (data && Array.isArray(data.states)) {
+        data.states.forEach(st => {
+          const lon = st[5], lat = st[6], baroAlt = st[7], callsign = st[1], track = st[10];
+          if (typeof lat !== 'number' || typeof lon !== 'number') return;
+          const altM = typeof baroAlt === 'number' ? Math.round(baroAlt) : 'GND';
+          const flightStr = callsign ? callsign.trim() : 'UNK';
+          parsed.push({ lat: lat, lon: lon, flight: flightStr, altMeters: altM, track: track || 0 });
+        });
+      }
+      return parsed;
+    }
+
+    async function fetchAircraftData() {
+      const lat = CONFIG.lat;
+      const lon = CONFIG.lon;
+      const radNm = CONFIG.radiusNm;
+
+      // Calculate Bounding Box for OpenSky Network fallback (~0.45 deg offset for 50km)
+      const latOffset = 0.45;
+      const lonOffset = 0.70;
+
+      const sources = [
+        {
+          name: "ADSB.lol",
+          url: `https://api.adsb.lol/v2/lat/${lat}/lon/${lon}/dist/${radNm}`
+        },
+        {
+          name: "ADSB.one",
+          url: `https://api.adsb.one/v2/point/${lat}/${lon}/${radNm}`
+        },
+        {
+          name: "OpenSky-Network",
+          url: `https://opensky-network.org/api/states/all?lamin=${(lat - latOffset).toFixed(4)}&lamax=${(lat + latOffset).toFixed(4)}&lomin=${(lon - lonOffset).toFixed(4)}&lomax=${(lon + lonOffset).toFixed(4)}`
+        }
       ];
 
-      for (let url of endpoints) {
+      for (let source of sources) {
         try {
-          const response = await fetch(url);
-          if (!response.ok) continue;
+          const response = await fetch(source.url, { mode: 'cors' });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          
+          const rawData = await response.json();
+          const normalized = parseAircraftPayload(rawData, source.name);
 
-          const data = await response.json();
-
-          if (data && Array.isArray(data.ac)) {
-            aircraftList = data.ac;
-            statusText = `ONLINE | PLANES IN RANGE: ${aircraftList.length}`;
-            console.log("Successfully fetched aircraft:", aircraftList.length);
-            return;
-          }
-        } catch (e) {
-          console.warn("Endpoint failed:", url, e);
+          aircraftList = normalized;
+          activeSource = `${source.name} | IN RANGE: ${aircraftList.length}`;
+          lastError = "";
+          console.log(`Success [${source.name}]: Loaded ${aircraftList.length} aircraft`);
+          return;
+        } catch (err) {
+          console.warn(`Source failed [${source.name}]:`, err.message);
+          lastError = `${source.name} failed (${err.message})`;
         }
       }
-      statusText = "ERROR: ALL API ENDPOINTS FAILED";
+
+      activeSource = "ALL SOURCES FAILED";
     }
 
     function drawRadar() {
       const cx = canvas.width / 2;
       const cy = canvas.height / 2;
-      const maxPx = cx - 20;
+      const maxPx = cx - 25;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Status Overlay
-      ctx.fillStyle = '#00ff66';
+      // Status Bar
+      ctx.fillStyle = activeSource.includes("ALL SOURCES FAILED") ? '#ff3333' : '#00ff66';
       ctx.font = '12px monospace';
-      ctx.fillText(statusText, 15, 25);
+      ctx.fillText(`STATUS: ${activeSource}`, 15, 25);
+      if (lastError && activeSource.includes("FAILED")) {
+        ctx.fillStyle = '#ff6666';
+        ctx.fillText(`LAST ERR: ${lastError}`, 15, 42);
+      }
 
-      // Distance Rings
+      // Distance Rings (10 km intervals)
       ctx.strokeStyle = '#003311';
       ctx.lineWidth = 1;
       for (let r = 10; r <= CONFIG.maxRadiusKm; r += 10) {
@@ -100,6 +152,10 @@
         ctx.beginPath();
         ctx.arc(cx, cy, ringPx, 0, 2 * Math.PI);
         ctx.stroke();
+
+        ctx.fillStyle = '#006622';
+        ctx.font = '9px monospace';
+        ctx.fillText(`${r}km`, cx + 2, cy - ringPx + 10);
       }
 
       // Crosshairs
@@ -108,10 +164,8 @@
       ctx.moveTo(cx - maxPx, cy); ctx.lineTo(cx + maxPx, cy);
       ctx.stroke();
 
-      // Aircraft Blips
+      // Render Aircraft Blips
       aircraftList.forEach(ac => {
-        if (typeof ac.lat !== 'number' || typeof ac.lon !== 'number') return;
-
         const distKm = getDistanceKm(CONFIG.lat, CONFIG.lon, ac.lat, ac.lon);
         if (distKm > CONFIG.maxRadiusKm) return;
 
@@ -119,20 +173,22 @@
         const rPx = (distKm / CONFIG.maxRadiusKm) * maxPx;
         const angleRad = bearing * Math.PI / 180;
 
+        // Polar to screen coordinates
         const x = cx + rPx * Math.sin(angleRad);
         const y = cy - rPx * Math.cos(angleRad);
 
-        const altMeters = typeof ac.alt_baro === 'number' ? Math.round(ac.alt_baro * 0.3048) : 'GND';
-
+        // Target Blip
         ctx.fillStyle = '#00ff66';
         ctx.beginPath();
         ctx.arc(x, y, 4, 0, 2 * Math.PI);
         ctx.fill();
 
+        // Target Data Label
         ctx.fillStyle = '#00ff66';
         ctx.font = '10px monospace';
-        const label = `${ac.flight ? ac.flight.trim() : 'UNK'} | ${altMeters}m`;
-        ctx.fillText(label, x + 6, y + 3);
+        const altText = typeof ac.altMeters === 'number' ? `${ac.altMeters}m` : ac.altMeters;
+        const label = `${ac.flight} | ${altText}`;
+        ctx.fillText(label, x + 7, y + 3);
       });
     }
 
