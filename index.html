@@ -53,25 +53,19 @@
     async function fetchAircraftData() {
       const lat = Number(CONFIG.lat);
       const lon = Number(CONFIG.lon);
-      const targetUrl = `https://api.airplanes.live/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`;
       
-      const proxyEndpoints = [
-        `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
-        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`
+      // Native CORS endpoints (No proxy required)
+      const endpoints = [
+        `https://api.adsb.lol/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`,
+        `https://api.adsb.one/v2/point/${lat}/${lon}/${CONFIG.radiusNm}`
       ];
 
-      for (let url of proxyEndpoints) {
+      for (let url of endpoints) {
         try {
           const response = await fetch(url);
           if (!response.ok) continue;
 
-          let data;
-          if (url.includes('allorigins.win')) {
-            const wrapper = await response.json();
-            data = JSON.parse(wrapper.contents);
-          } else {
-            data = await response.json();
-          }
+          const data = await response.json();
 
           if (data && Array.isArray(data.ac)) {
             aircraftList = data.ac;
@@ -80,10 +74,10 @@
             return;
           }
         } catch (e) {
-          console.warn("Proxy attempt failed:", url, e);
+          console.warn("Endpoint failed:", url, e);
         }
       }
-      statusText = "ERROR: NO DATA FROM PROXIES";
+      statusText = "ERROR: ALL API ENDPOINTS FAILED";
     }
 
     function drawRadar() {
@@ -93,12 +87,12 @@
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Draw Status Text Overlay
+      // Status Overlay
       ctx.fillStyle = '#00ff66';
       ctx.font = '12px monospace';
       ctx.fillText(statusText, 15, 25);
 
-      // Draw concentric distance rings (10 km intervals)
+      // Distance Rings
       ctx.strokeStyle = '#003311';
       ctx.lineWidth = 1;
       for (let r = 10; r <= CONFIG.maxRadiusKm; r += 10) {
@@ -108,13 +102,13 @@
         ctx.stroke();
       }
 
-      // Draw crosshairs
+      // Crosshairs
       ctx.beginPath();
       ctx.moveTo(cx, cy - maxPx); ctx.lineTo(cx, cy + maxPx);
       ctx.moveTo(cx - maxPx, cy); ctx.lineTo(cx + maxPx, cy);
       ctx.stroke();
 
-      // Draw aircraft blips
+      // Aircraft Blips
       aircraftList.forEach(ac => {
         if (typeof ac.lat !== 'number' || typeof ac.lon !== 'number') return;
 
