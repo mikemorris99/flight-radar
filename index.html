@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Flight Radar</title>
+  <style>
+    body { margin: 0; background-color: #050b05; color: #00ff66; font-family: monospace; overflow: hidden; }
+    canvas { display: block; margin: 0 auto; background: #000; }
+  </style>
+</head>
+<body>
+  <canvas id="radarCanvas"></canvas>
+  <script>
+    const CONFIG = {
+      lat: 51.049476,
+      lon: 0.183738,
+      radiusNm: 27,        // API query radius in NM (~50 km)
+      maxRadiusKm: 50,     // Radar edge distance in km
+      pollIntervalMs: 15000
+    };
+
+    const canvas = document.getElementById('radarCanvas');
+    const ctx = canvas.getContext('2d');
+    let aircraftList = [];
+
+    function resizeCanvas() {
+      const size = Math.min(window.innerWidth, window.innerHeight);
+      canvas.width = size;
+      canvas.height = size;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Haversine formula for distance in km
+    function getDistanceKm(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) ** 2 +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    // Initial bearing calculation in degrees
+    function getBearingDeg(lat1, lon1, lat2, lon2) {
+      const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
+      const Δλ = (lon2 - lon1) * Math.PI / 180;
+      const y = Math.sin(Δλ) * Math.cos(φ2);
+      const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    async function fetchAircraftData() {
+      try {
+        const url = `https://api.airplanes.live/v2/point/${CONFIG.lat}/${CONFIG.lon}/${CONFIG.radiusNm}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        aircraftList = data.ac || [];
+      } catch (err) {
+        console.error("API Fetch Error:", err);
+      }
+    }
+
+    function drawRadar() {
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const maxPx = cx - 20;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw concentric distance rings (10 km intervals)
+      ctx.strokeStyle = '#003311';
+      ctx.lineWidth = 1;
+      for (let r = 10; r <= CONFIG.maxRadiusKm; r += 10) {
+        const ringPx = (r / CONFIG.maxRadiusKm) * maxPx;
+        ctx.beginPath();
+        ctx.arc(cx, cy, ringPx, 0, 2 * Math.PI);
+        ctx.stroke();
+      }
+
+      // Draw crosshairs
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - maxPx); ctx.lineTo(cx, cy + maxPx);
+      ctx.moveTo(cx - maxPx, cy); ctx.lineTo(cx + maxPx, cy);
+      ctx.stroke();
+
+      // Draw aircraft blips
+      aircraftList.forEach(ac => {
+        if (!ac.lat || !ac.lon) return;
+
+        const distKm = getDistanceKm(CONFIG.lat, CONFIG.lon, ac.lat, ac.lon);
+        if (distKm > CONFIG.maxRadiusKm) return;
+
+        const bearing = getBearingDeg(CONFIG.lat, CONFIG.lon, ac.lat, ac.lon);
+        const rPx = (distKm / CONFIG.maxRadiusKm) * maxPx;
+        const angleRad = bearing * Math.PI / 180;
+
+        // Convert polar to Cartesian screen coordinates
+        const x = cx + rPx * Math.sin(angleRad);
+        const y = cy - rPx * Math.cos(angleRad);
+
+        // Convert altitude from feet to meters
+        const altMeters = typeof ac.alt_baro === 'number' ? Math.round(ac.alt_baro * 0.3048) : 'GND';
+
+        // Plot blip
+        ctx.fillStyle = '#00ff66';
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Label text
+        ctx.fillStyle = '#00ff66';
+        ctx.font = '10px monospace';
+        const label = `${ac.flight ? ac.flight.trim() : 'UNK'} | ${altMeters}m`;
+        ctx.fillText(label, x + 6, y + 3);
+      });
+    }
+
+    setInterval(fetchAircraftData, CONFIG.pollIntervalMs);
+    setInterval(drawRadar, 1000);
+    fetchAircraftData();
+  </script>
+</body>
+</html>
